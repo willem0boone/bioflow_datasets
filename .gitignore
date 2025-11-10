@@ -1,0 +1,35 @@
+# Python cache and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE folders
+.idea/
+*.iml
+
+# Output folders
+output/
+output_all_datasets/
+output_raw/
+plots/
+
+# CSV files (catch any stray CSVs)
+*.csv
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.gif
+
+# Logs
+*.log
+
+# MacOS files
+.DS_Store
+
+# Windows files
+Thumbs.db

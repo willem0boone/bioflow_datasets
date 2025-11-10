@@ -1,0 +1,6 @@
+geopandas
+pystac_client
+pyarrow
+matplotlib
+contextily
+shapely
