@@ -56,7 +56,7 @@ def plot_aphia_pie(aphia_list, output_file, title="", top_n=15):
     print(f"✅ Saved pie chart to {output_file} (total observations: {total})")
 
 
-def plot_aphia_per_csv(csv_files, output_dir="../plots", top_n=15):
+def plot_aphia_per_csv(csv_files, output_dir, top_n=15):
     """Plot AphiaID distribution per CSV and for all merged."""
     all_aphia = []
 
@@ -69,7 +69,7 @@ def plot_aphia_per_csv(csv_files, output_dir="../plots", top_n=15):
         # Plot per CSV
         plot_aphia_pie(
             aphia_list,
-            output_file=Path(output_dir) / f"aphia_distribution_dasid_{dasid}.png",
+            output_file=Path(output_dir) / f"aphia/aphia_distribution_dasid_{dasid}.png",
             title=f"AphiaID Distribution for DASID {dasid}",
             top_n=top_n
         )
@@ -86,6 +86,13 @@ def plot_aphia_per_csv(csv_files, output_dir="../plots", top_n=15):
 
 
 if __name__ == "__main__":
-    output_csv_dir = Path("../output")
-    csv_files = sorted(output_csv_dir.glob("*.csv"))
-    plot_aphia_per_csv(csv_files)
+    output_csv_dir1 = Path("../output_call1")
+    output_csv_dir2 = Path("../output_wp3")
+
+    csv_files1 = sorted(output_csv_dir1.glob("*.csv"))
+    csv_files2 = sorted(output_csv_dir2.glob("*.csv"))
+
+    csv_files = csv_files1 + csv_files2
+
+    plot_aphia_per_csv(csv_files, output_dir="../plots/")
+

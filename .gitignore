@@ -9,7 +9,7 @@ __pycache__/
 *.iml
 
 # Output folders
-output/
+output_call1/
 output_all_datasets/
 output_raw/
 plots/

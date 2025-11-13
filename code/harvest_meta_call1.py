@@ -84,7 +84,7 @@ def extract_data(dataset, dataset_id: int, output_dir: Path):
           .agg({"aphiaid": lambda x: sorted(set(x))})  # ensures unique aphiaids per space-time
     )
 
-    # Prepare output file
+    # Prepare output_call1 file
     csv_name = output_dir / f"dasid_{dataset_id}.csv"
     df_grouped.to_csv(csv_name, index=False)
     print(f"✅ Saved {len(df_grouped)} aggregated records for datasetid {dataset_id} to {csv_name}")
@@ -93,15 +93,15 @@ def extract_data(dataset, dataset_id: int, output_dir: Path):
 
 if __name__ == "__main__":
     # Read dataset IDs from text file
-    dataset_ids = read_dataset_ids("dasid.txt")
+    dataset_ids = read_dataset_ids("dasid_call1.txt")
 
     # Get first available parquet dataset URL from STAC
     occ = find_occurrence_data()
     data_file = next(occ)
     print(f"Using dataset: {data_file}")
 
-    # Prepare output directory
-    output_dir = Path("../output2")
+    # Prepare output_call1 directory
+    output_dir = Path("../output_call1")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Set up S3 dataset once
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         print(f"dataset {i} out of {len(dataset_ids)}")
         extract_data(dataset, did, output_dir)
 
-    extract_data(dataset, 4687, output_dir)
+    # extract_data(dataset, 4687, output_dir)
 
 
     
