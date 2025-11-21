@@ -92,8 +92,6 @@ if __name__ == "__main__":
 
     dataset = setup_s3_dataset(data_file)
 
-    output_csv = Path("../output_raw/")
+    output_csv = Path("../data/output_raw/dasid_4687/")
     extract_data_in_batches(dataset, dasid=4687, output_dir=output_csv)
-
-
 

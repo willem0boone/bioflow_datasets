@@ -9,9 +9,9 @@ __pycache__/
 *.iml
 
 # Output folders
-output_call1/
-output_all_datasets/
-output_raw/
+data/output_call1/
+data/output_all_datasets/
+data/output_raw/
 plots/
 
 # CSV files (catch any stray CSVs)

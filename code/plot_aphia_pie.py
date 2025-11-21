@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 from collections import Counter
 import matplotlib.pyplot as plt
+import requests
 
 
 def plot_aphia_pie(aphia_list, output_file, title="", top_n=15):
@@ -86,8 +87,8 @@ def plot_aphia_per_csv(csv_files, output_dir, top_n=15):
 
 
 if __name__ == "__main__":
-    output_csv_dir1 = Path("../output_call1")
-    output_csv_dir2 = Path("../output_wp3")
+    output_csv_dir1 = Path("../data/output_call1")
+    output_csv_dir2 = Path("../data/output_wp3")
 
     csv_files1 = sorted(output_csv_dir1.glob("*.csv"))
     csv_files2 = sorted(output_csv_dir2.glob("*.csv"))

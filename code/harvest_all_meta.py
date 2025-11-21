@@ -105,7 +105,7 @@ if __name__ == "__main__":
     print(f"Using dataset: {data_file}")
 
     # Prepare output_call1 directory
-    output_dir = Path("../output_all_datasets")
+    output_dir = Path("../data/output_all_datasets")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Prepare progress tracking file
