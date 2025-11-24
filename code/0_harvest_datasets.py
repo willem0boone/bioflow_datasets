@@ -55,14 +55,11 @@ def setup_s3_dataset(url: str):
 
 def extract_call1_data(dataset, dataset_id: int, output_dir: Path):
     """
-    Extract data for one dataset ID, keep unique latitude, longitude, observationdate combinations,
-    and store all unique aphiaids at that location and time in a list. Save to its own CSV.
+    Extract data for one dataset ID, keep unique latitude, longitude, observationdate, timeofday combinations,
+    store all unique aphiaids at that location and time in a list, and save to CSV.
+    Handles missing timeofday and empty aphiaid values.
     """
-
-    # Only keep needed columns
-    columns_needed = ["datasetid", "latitude", "longitude", "observationdate", "aphiaid"]
-
-    # Filter for the current dataset_id
+    columns_needed = ["datasetid", "latitude", "longitude", "observationdate", "aphiaid", "timeofday"]
     dataset_filter = pc.field("datasetid") == dataset_id
 
     try:
@@ -76,29 +73,40 @@ def extract_call1_data(dataset, dataset_id: int, output_dir: Path):
         print(f"No records found for datasetid {dataset_id}")
         return
 
-    # ✅ Drop duplicates across all grouping keys + aphiaid (safety check)
-    df = df.drop_duplicates(subset=["latitude", "longitude", "observationdate", "aphiaid"])
+    # ----------------------------
+    # Clean and prepare columns
+    # ----------------------------
+    # Ensure 'timeofday' exists and fill missing values
+    if "timeofday" not in df.columns:
+        df["timeofday"] = ""
+    df["timeofday"] = df["timeofday"].fillna("")
 
-    # ✅ Group by lat, lon, datetime and aggregate unique aphiaids
+    # Drop duplicates across grouping keys + aphiaid
+    df = df.drop_duplicates(subset=["latitude", "longitude", "observationdate", "aphiaid", "timeofday"])
+
+    # Parse aphiaid column (ensure list of unique integers)
+    df["aphiaid"] = df["aphiaid"].apply(lambda x: sorted(set(ast.literal_eval(x))) if isinstance(x, str) else ([x] if pd.notna(x) else []))
+
+    # Group by lat, lon, datetime, timeofday
     df_grouped = (
-        df.groupby(["latitude", "longitude", "observationdate"], as_index=False)
-          .agg({"aphiaid": lambda x: sorted(set(x))})  # ensures unique aphiaids per space-time
+        df.groupby(["latitude", "longitude", "observationdate", "timeofday"], as_index=False)
+          .agg({"aphiaid": lambda x: sorted(set([a for sub in x for a in (sub if isinstance(sub, list) else [sub])]))})
     )
 
-    # Prepare output_call1 file
+    # Save to CSV
     csv_name = output_dir / f"dasid_{dataset_id}.csv"
     df_grouped.to_csv(csv_name, index=False)
+    max_aphiaids = df_grouped["aphiaid"].apply(len).max() if not df_grouped.empty else 0
     print(f"✅ Saved {len(df_grouped)} aggregated records for datasetid {dataset_id} to {csv_name}")
-    print(f"   ↳ Each (lat, lon, time) has {df_grouped['aphiaid'].apply(len).max()} max unique aphiaids")
+    print(f"   ↳ Each (lat, lon, time) has {max_aphiaids} max unique aphiaids")
 
 
 def extract_sensor_data(dataset, dataset_id: int, output_dir: Path):
     """
-    Extract data for one dataset ID, keep unique latitude, longitude, observationdate combinations,
-    and store all unique aphiaids at that location and time in a list. Save to its own CSV.
+    Extract sensor data for one dataset ID with unique spatial-temporal coordinates.
+    Handles missing timeofday and cleans aphiaids.
     """
-
-    columns_needed = ["datasetid", "latitude", "longitude", "observationdate", "aphiaid"]
+    columns_needed = ["datasetid", "latitude", "longitude", "observationdate", "aphiaid", "timeofday"]
     dataset_filter = pc.field("datasetid") == dataset_id
 
     try:
@@ -112,71 +120,48 @@ def extract_sensor_data(dataset, dataset_id: int, output_dir: Path):
         print(f"No records found for datasetid {dataset_id}")
         return
 
-    # ✅ Clean and standardize observationdate
+    # Clean observationdate
     df["observationdate"] = pd.to_datetime(df["observationdate"], errors="coerce")
 
-    # ✅ Filter for recent data (only for specific dataset IDs)
+    # Filter for recent data if needed
     if dataset_id in [3117, 4688, 5531]:
-        df["observationdate"] = pd.to_datetime(df["observationdate"], utc=True, errors="coerce")
         cutoff = datetime(2023, 9, 1, tzinfo=timezone.utc)
         df = df[df["observationdate"] >= cutoff]
         if df.empty:
             print(f"No records from September 2023 onwards for datasetid {dataset_id}")
             return
 
-    # ✅ Clean aphiaid column
-    before = len(df)
-
-    # Convert all to string, strip whitespace, remove commas
-    df["aphiaid"] = (
-        df["aphiaid"]
-        .astype(str)
-        .str.replace(",", "", regex=False)
-        .str.strip()
-    )
-
-    # Replace empty or 'nan'/'None' strings with NaN
-    df["aphiaid"] = df["aphiaid"].replace(
-        ["nan", "None", "none", "null", "", "[]"], pd.NA
-    )
-
-    # Drop rows with missing or invalid aphiaids
+    # Clean aphiaid column
+    df["aphiaid"] = df["aphiaid"].astype(str).str.replace(",", "", regex=False).str.strip()
+    df["aphiaid"] = df["aphiaid"].replace(["nan", "None", "none", "null", "", "[]"], pd.NA)
     df = df.dropna(subset=["aphiaid"])
-
-    # Convert to integers where possible
     df["aphiaid"] = pd.to_numeric(df["aphiaid"], errors="coerce").dropna().astype(int)
 
-    after = len(df)
-    if after < before:
-        print(f"⚠️ Dropped {before - after} rows with invalid/missing aphiaid values in datasetid {dataset_id}")
+    # Ensure 'timeofday' exists and fill missing
+    if "timeofday" not in df.columns:
+        df["timeofday"] = ""
+    df["timeofday"] = df["timeofday"].fillna("")
 
-    # ✅ Drop duplicates across grouping keys + aphiaid
-    df = df.drop_duplicates(subset=["latitude", "longitude", "observationdate", "aphiaid"])
-
-    # ✅ Group by spatial-temporal coordinates and aggregate unique aphiaids
+    # Drop duplicates and group
+    df = df.drop_duplicates(subset=["latitude", "longitude", "observationdate", "aphiaid", "timeofday"])
     df_grouped = (
-        df.groupby(["latitude", "longitude", "observationdate"], as_index=False)
-          .agg({"aphiaid": lambda x: sorted(set(x))})
+        df.groupby(["latitude", "longitude", "observationdate", "timeofday"], as_index=False)
+          .agg({"aphiaid": lambda x: sorted(set([a for a in x]))})
     )
 
-    # Save to CSV
     csv_name = output_dir / f"dasid_{dataset_id}.csv"
     df_grouped.to_csv(csv_name, index=False)
-
+    max_aphiaids = df_grouped["aphiaid"].apply(len).max() if not df_grouped.empty else 0
     print(f"✅ Saved {len(df_grouped)} aggregated records for datasetid {dataset_id} to {csv_name}")
-    print(f"   ↳ Each (lat, lon, time) has {df_grouped['aphiaid'].apply(len).max()} max unique aphiaids")
+    print(f"   ↳ Each (lat, lon, time) has {max_aphiaids} max unique aphiaids")
 
 
 def extract_tracking_data(dataset, dataset_id: int, output_dir: Path):
     """
-    Extract data for one dataset ID, keep unique latitude, longitude, observationdate combinations,
-    and store all unique aphiaids at that location and time in a list. Save to its own CSV.
+    Extract tracking data for one dataset ID with unique spatial-temporal coordinates.
+    Handles missing timeofday and cleans aphiaids.
     """
-
-    # Only keep needed columns
-    columns_needed = ["datasetid", "latitude", "longitude", "observationdate", "aphiaid"]
-
-    # Filter for the current dataset_id
+    columns_needed = ["datasetid", "latitude", "longitude", "observationdate", "aphiaid", "timeofday"]
     dataset_filter = pc.field("datasetid") == dataset_id
 
     try:
@@ -190,20 +175,25 @@ def extract_tracking_data(dataset, dataset_id: int, output_dir: Path):
         print(f"No records found for datasetid {dataset_id}")
         return
 
-    # ✅ Drop duplicates across all grouping keys + aphiaid (safety check)
-    df = df.drop_duplicates(subset=["latitude", "longitude", "observationdate", "aphiaid"])
+    # Ensure 'timeofday' exists and fill missing
+    if "timeofday" not in df.columns:
+        df["timeofday"] = ""
+    df["timeofday"] = df["timeofday"].fillna("")
 
-    # ✅ Group by lat, lon, datetime and aggregate unique aphiaids
+    # Drop duplicates and group
+    df = df.drop_duplicates(subset=["latitude", "longitude", "observationdate", "aphiaid", "timeofday"])
+    df["aphiaid"] = df["aphiaid"].apply(lambda x: sorted(set(ast.literal_eval(x))) if isinstance(x, str) else ([x] if pd.notna(x) else []))
     df_grouped = (
-        df.groupby(["latitude", "longitude", "observationdate"], as_index=False)
-          .agg({"aphiaid": lambda x: sorted(set(x))})  # ensures unique aphiaids per space-time
+        df.groupby(["latitude", "longitude", "observationdate", "timeofday"], as_index=False)
+          .agg({"aphiaid": lambda x: sorted(set([a for sub in x for a in (sub if isinstance(sub, list) else [sub])]))})
     )
 
-    # Prepare output_call1 file
     csv_name = output_dir / f"dasid_{dataset_id}.csv"
     df_grouped.to_csv(csv_name, index=False)
+    max_aphiaids = df_grouped["aphiaid"].apply(len).max() if not df_grouped.empty else 0
     print(f"✅ Saved {len(df_grouped)} aggregated records for datasetid {dataset_id} to {csv_name}")
-    print(f"   ↳ Each (lat, lon, time) has {df_grouped['aphiaid'].apply(len).max()} max unique aphiaids")
+    print(f"   ↳ Each (lat, lon, time) has {max_aphiaids} max unique aphiaids")
+
 
 
 if __name__ == "__main__":

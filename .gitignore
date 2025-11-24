@@ -33,3 +33,6 @@ plots/
 
 # Windows files
 Thumbs.db
+
+/cache
+/data

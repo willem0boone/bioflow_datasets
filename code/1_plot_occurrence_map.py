@@ -1,5 +1,15 @@
-from folium.plugins import HeatMap
-import folium
+#!/usr/bin/env python3
+"""
+Plot unique observation/sensor locations:
+
+- plot every CSV individually (loop over csv_all)
+- plot combined map for WP3 (csv_wp3)
+- plot combined map for Call1 (csv_call1)
+- plot combined map for Call1+WP3 (csv_all)
+
+Each combined map includes a text box listing DASIDs.
+"""
+from pathlib import Path
 import ast
 import pandas as pd
 import geopandas as gpd
@@ -7,249 +17,315 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import contextily as ctx
-from pathlib import Path
+import textwrap
+
+# -------------------------
+# Configuration
+# -------------------------
+WEB_MERC_MAX_X = 20037508.34
+WEB_MERC_MIN_X = -20037508.34
+WEB_MERC_YMIN = -9074929
+WEB_MERC_YMAX = 16847944
+MIN_SIDE = 150_000  # 150 km minimum side for extents
 
 
-def plot_unique_locations(csv_files, output_file):
+def parse_aphia(val):
+    """Safely parse aphiaid column values into a list."""
+    if isinstance(val, list):
+        return val
+    if pd.isna(val):
+        return []
+    try:
+        return ast.literal_eval(str(val))
+    except Exception:
+        # if parsing fails, return empty list
+        return []
 
-    output_file = Path(output_file)
-    subdir = output_file.parent / "map_per_dasid"
-    subdir.mkdir(parents=True, exist_ok=True)
 
-    # Load world once
-    world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres")).to_crs(epsg=3857)
-
-    # Hard-coded Web Mercator vertical limits
-    YMIN = -9074929
-    YMAX = +16847944
-
-    total_obs_all = 0
-    total_taxa_all = set()
-    combined_gdf_list = []
-
-    for csv_file in csv_files:
-
-        dasid = Path(csv_file).stem.split("_")[-1]
-
+def read_csv_as_unique_gdf(csv_file):
+    """
+    Read CSV and return GeoDataFrame in Web Mercator (EPSG:3857).
+    Does NOT collapse duplicates; all rows are preserved.
+    Columns: latitude, longitude, aphiaid (list), obs_count, dasid, geometry.
+    Returns None if CSV cannot be read or has no valid coordinates.
+    """
+    try:
         df = pd.read_csv(csv_file)
-        df["aphiaid"] = df["aphiaid"].apply(lambda x: eval(x) if isinstance(x, str) else [])
+    except Exception as e:
+        print(f"⚠️ Could not read {csv_file}: {e}")
+        return None
 
-        obs_count = df["aphiaid"].apply(len).sum()
-        unique_taxa = set(a for sub in df["aphiaid"] for a in sub)
+    if "latitude" not in df.columns or "longitude" not in df.columns:
+        print(f"⚠️ Missing lat/lon in {csv_file} - skipping")
+        return None
 
-        # collapse duplicates by lat/lon
-        df_unique = df.groupby(["latitude", "longitude"]).agg({
-            "aphiaid": lambda x: [a for sub in x for a in sub]
-        }).reset_index()
-        df_unique["obs_count"] = df_unique["aphiaid"].apply(len)
+    # ensure numeric lat/lon and drop rows without coords
+    df = df.dropna(subset=["latitude", "longitude"])
+    if df.empty:
+        print(f"⚠️ No coordinate rows in {csv_file} - skipping")
+        return None
 
-        gdf = gpd.GeoDataFrame(
-            df_unique,
-            geometry=gpd.points_from_xy(df_unique.longitude, df_unique.latitude),
-            crs="EPSG:4326"
-        ).to_crs(3857)
+    # parse aphiaid column
+    if "aphiaid" in df.columns:
+        df["aphiaid"] = df["aphiaid"].apply(parse_aphia)
+    else:
+        df["aphiaid"] = [[] for _ in range(len(df))]
 
-        combined_gdf_list.append(gdf)
+    # add obs_count column (length of aphiaid list)
+    df["obs_count"] = df["aphiaid"].apply(len)
 
-        # -------------------------------------------------------------
-        # INDIVIDUAL MAP
-        # -------------------------------------------------------------
-        fig = plt.figure(figsize=(10, 10))
-        ax = fig.add_axes([0.05, 0.05, 0.9, 0.9])
+    # add dasid
+    dasid = Path(csv_file).stem.split("_")[-1]
+    df["dasid"] = dasid
 
-        gdf.plot(ax=ax, markersize=10, color=(1, 0, 0, 0.8))
+    # create geodataframe and convert to web mercator
+    gdf = gpd.GeoDataFrame(
+        df,
+        geometry=gpd.points_from_xy(df.longitude, df.latitude),
+        crs="EPSG:4326"
+    )
 
-        # get bounds
-        x_min, y_min, x_max, y_max = gdf.total_bounds
+    # Convert to Web Mercator (EPSG:3857)
+    try:
+        gdf = gdf.to_crs(3857)
+    except Exception as e:
+        print(f"⚠️ CRS transform failed for {csv_file}: {e}")
+        return None
 
-        # square extent
-        dx = x_max - x_min
-        dy = y_max - y_min
+    # drop rows with invalid geometry
+    gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+    if gdf.empty:
+        print(f"⚠️ No valid geometries in {csv_file} after processing - skipping")
+        return None
 
-        min_side = 150000  # minimum 150 km square
-        side = max(dx, dy, min_side)
+    return gdf
 
-        cx = (x_min + x_max) / 2
-        cy = (y_min + y_max) / 2
 
-        x_left  = cx - side/2
-        x_right = cx + side/2
+def add_inset_world(ax, x_left, x_right, y_bot, y_top, side, world_gdf):
+    """Add a small inset world map showing the region rectangle."""
+    inset = inset_axes(ax, width="28%", height="28%", loc="lower left", borderpad=1.2)
+    inset.set_aspect("equal")
+    # plot world boundary (already in web mercator)
+    world_gdf.boundary.plot(ax=inset, linewidth=0.4, edgecolor="gray")
 
-        y_bot   = max(cy - side/2, YMIN)
-        y_top   = min(cy + side/2, YMAX)
+    inset.set_xlim(WEB_MERC_MIN_X, WEB_MERC_MAX_X)
+    inset.set_ylim(WEB_MERC_YMIN, WEB_MERC_YMAX)
 
-        ax.set_xlim(x_left, x_right)
-        ax.set_ylim(y_bot, y_top)
-        ax.set_aspect("equal")
+    pad = side * 0.15
+    rect = Rectangle(
+        (x_left - pad, y_bot - pad),
+        (x_right - x_left) + 2 * pad,
+        (y_top - y_bot) + 2 * pad,
+        linewidth=2.0,
+        edgecolor="red",
+        facecolor="none"
+    )
+    inset.add_patch(rect)
 
-        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+    inset.set_xticks([])
+    inset.set_yticks([])
 
-        # REMOVE ticks, tick labels, and axis labels
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.set_axis_off()   # also hides axis frame
 
-        ax.set_title(f"DASID {dasid}\nObs: {obs_count} | Taxa: {len(unique_taxa)}")
-
-        # -------------------------------------------------------------
-        # INSET MAP (lower-left, padded red rectangle)
-        # -------------------------------------------------------------
-        inset = inset_axes(ax, width="28%", height="28%", loc="lower left", borderpad=1.2)
-
-        world.boundary.plot(ax=inset, linewidth=0.4, edgecolor="gray")
-
-        inset.set_xlim(-20037508.34, 20037508.34)
-        inset.set_ylim(YMIN, YMAX)
-        inset.set_aspect("equal")
-
-        # Draw RED RECTANGLE with padding
-        pad_inset = side * 0.15
-
-        rect = Rectangle(
-            (x_left - pad_inset, y_bot - pad_inset),
-            side + 2*pad_inset,
-            (y_top - y_bot) + 2*pad_inset,
-            linewidth=2.0,
-            edgecolor="red",
-            facecolor="none"
-        )
-        inset.add_patch(rect)
-
-        # REMOVE ticks / labels on inset
-        inset.set_xticks([])
-        inset.set_yticks([])
-        inset.set_xlabel("")
-        inset.set_ylabel("")
-        inset.set_frame_on(True)
-
-        outfile = subdir / f"dasid_{dasid}_map.png"
-        fig.savefig(outfile, dpi=300, bbox_inches="tight")
-        plt.close(fig)
-
-        print(f"Saved individual map: {outfile}")
-
-        total_obs_all += obs_count
-        total_taxa_all.update(unique_taxa)
-
-    # -------------------------------------------------------------
-    # COMBINED MAP
-    # -------------------------------------------------------------
-    combined_gdf = pd.concat(combined_gdf_list, ignore_index=True)
+def plot_gdf_map(
+        gdf,
+        output_path: Path,
+        title: str = "",
+        dasids_text: str = "",
+        show_inset: bool = True,
+        marker_size: float = 10,
+        alpha: float = 0.7
+):
+    """
+    Plot a single GeoDataFrame (EPSG:3857) to output_path PNG.
+    Adds an inset and a text box for DASIDs unless disabled.
+    marker_size and alpha control the point style.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_axes([0.05, 0.05, 0.9, 0.9])
 
-    combined_gdf.plot(ax=ax, markersize=2, color=(1, 0, 0, 0.8))
+    # scatter points
+    gdf.plot(ax=ax, markersize=marker_size, color=(1, 0, 0, alpha))
 
-    ax.set_xlim(-20037508.34, 20037508.34)
-    ax.set_ylim(YMIN, YMAX)
+    # compute extents
+    if show_inset:
+        x_min, y_min, x_max, y_max = gdf.total_bounds
+        dx, dy = x_max - x_min, y_max - y_min
+        side = max(dx, dy, MIN_SIDE)
+
+        cx, cy = (x_min + x_max) / 2.0, (y_min + y_max) / 2.0
+        x_left = cx - side / 2.0
+        x_right = cx + side / 2.0
+        y_bot = max(cy - side / 2.0, WEB_MERC_YMIN)
+        y_top = min(cy + side / 2.0, WEB_MERC_YMAX)
+    else:
+        x_left, x_right = WEB_MERC_MIN_X, WEB_MERC_MAX_X
+        y_bot, y_top = WEB_MERC_YMIN, WEB_MERC_YMAX
+
+    ax.set_xlim(x_left, x_right)
+    ax.set_ylim(y_bot, y_top)
     ax.set_aspect("equal")
 
-    ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+    # basemap
+    try:
+        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+    except Exception:
+        pass
 
-    # REMOVE all x/y labels and ticks
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_xlabel("")
-    ax.set_ylabel("")
     ax.set_axis_off()
 
-    ax.set_title(
-        f"Observation Locations (All Datasets)\n"
-        f"Obs: {total_obs_all} | Taxa: {len(total_taxa_all)}"
+    # add number of features in the title + unique aphiaIDs
+    n_observations = len(gdf)
+    n_taxa = gdf["aphiaid"].apply(len).sum() if "aphiaid" in gdf.columns else 0
+    n_unique_aphia = len(
+        set([aid for sublist in gdf.get("aphiaid", []) for aid in sublist]))
+
+    if title:
+        ax.set_title(
+            f"{title}\nObservations: {n_observations} | Taxa: {n_unique_aphia}",
+            fontsize=13)
+
+    # INSET WORLD MAP — only if show_inset=True
+    if show_inset:
+        try:
+            add_inset_world(ax, x_left, x_right, y_bot, y_top,
+                            x_right - x_left, PLOT_WORLD_GDF)
+        except Exception:
+            pass
+
+    # DASID textbox
+    if dasids_text:
+        import textwrap
+        wrapped = textwrap.fill(dasids_text, width=100)
+        ax.text(
+            0.98, 0.02,
+            f"DASIDs:\n{wrapped}",
+            transform=ax.transAxes,
+            va="bottom",
+            ha="right",
+            fontsize=8,
+            linespacing=1.2,
+            bbox=dict(facecolor="white", alpha=0.7, edgecolor="black",
+                      linewidth=0.5)
+        )
+
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✔ Saved map: {output_path}")
+
+
+def plot_each_csv_individual(csv_files, outdir_base: Path):
+    """Plot every CSV in csv_files individually. Save outputs in outdir_base/map_per_dasid/."""
+    outdir = outdir_base / "map_per_dasid"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    for csv_path in csv_files:
+        gdf = read_csv_as_unique_gdf(csv_path)
+        if gdf is None:
+            continue
+        dasid = gdf["dasid"].iloc[0]
+        out_file = outdir / f"dasid_{dasid}.png"
+        plot_gdf_map(gdf, out_file, title=f"DASID {dasid}", dasids_text=dasid)
+
+
+def plot_combined(csv_files, out_file_base: Path, title: str, show_inset=True):
+    """
+    Combine all CSVs in csv_files and plot a single map.
+    Generates two versions:
+      1) alpha=1, markersize=1
+      2) alpha=0.01, markersize=1
+    The DASID textbox contains the comma-separated list of DASIDs used.
+    """
+    gdfs = []
+    dasids = []
+    for csv_path in csv_files:
+        gdf = read_csv_as_unique_gdf(csv_path)
+        if gdf is None:
+            continue
+        gdfs.append(gdf)
+        dasids.append(str(gdf["dasid"].iloc[0]))
+
+    if not gdfs:
+        print(f"⚠️ No valid input files for combined plot '{title}' - skipping")
+        return
+
+    combined = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True))
+    combined = combined.drop_duplicates(subset=["geometry"])
+
+    dasids_text = ", ".join(dasids)
+
+    # Version 1: alpha=1
+    out_file_alpha1 = out_file_base.with_name(f"{out_file_base.stem}_alpha1.png")
+    plot_gdf_map(
+        combined,
+        out_file_alpha1,
+        title=title,
+        dasids_text=dasids_text,
+        show_inset=show_inset,
+        marker_size=1,
+        alpha=1
     )
 
-    fig.savefig(output_file, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"Saved combined map: {output_file}")
-
-
-def find_bad_aphiaid_entries(csv_files, column="aphiaid", max_errors=10):
-    """
-    Scan CSVs for rows where ast.literal_eval() fails on the aphiaid column.
-
-    Parameters
-    ----------
-    csv_files : list or Path
-        List of CSV file paths to check.
-    column : str
-        Column name to validate (default: 'aphiaid').
-    max_errors : int
-        Max number of bad rows to show per file.
-
-    Returns
-    -------
-    bad_summary : dict
-        Dictionary mapping CSV file → list of (row_index, bad_value, error_message).
-    """
-
-    bad_summary = {}
-
-    for csv_file in csv_files:
-        try:
-            df = pd.read_csv(csv_file)
-        except Exception as e:
-            print(f"⚠️ Could not read {csv_file}: {e}")
-            continue
-
-        if column not in df.columns:
-            print(f"⚠️ Column '{column}' not found in {csv_file}")
-            continue
-
-        bad_rows = []
-        for idx, val in df[column].items():
-            if pd.isna(val):
-                continue  # skip true NaN
-            if isinstance(val, list):
-                continue  # already parsed
-            try:
-                ast.literal_eval(str(val))
-            except Exception as e:
-                bad_rows.append((idx, val, str(e)))
-                if len(bad_rows) >= max_errors:
-                    break
-
-        if bad_rows:
-            bad_summary[csv_file] = bad_rows
-            print(
-                f"\n🚨 Found {len(bad_rows)} bad aphiaid entries in: {csv_file}")
-            for i, (idx, val, err) in enumerate(bad_rows):
-                print(f"   [{idx}] {val!r} → {err}")
-        else:
-            print(f"✅ {csv_file} is clean — all aphiaid values parsed OK")
-
-    print(
-        f"\n🔍 Summary: {len(bad_summary)} file(s) have malformed aphiaid entries.")
-    return bad_summary
+    # Version 2: alpha=0.01
+    out_file_alpha001 = out_file_base.with_name(f"{out_file_base.stem}_alpha0_01.png")
+    plot_gdf_map(
+        combined,
+        out_file_alpha001,
+        title=f"{title} (transparent)",
+        dasids_text=dasids_text,
+        show_inset=show_inset,
+        marker_size=1,
+        alpha=0.01
+    )
 
 
+# -------------------------
+# Main run
+# -------------------------
 if __name__ == "__main__":
+    # input directories (adjust as needed)
     dir_call1 = Path("../data/output_call1")
-    csv_files_call1 = list(dir_call1.glob("*.csv"))
+    dir_wp3 = Path("../data/output_sensor_data")
 
-    dir_wp3 = Path("../data/output_wp3")
-    csv_files_wp3 = list(dir_wp3.glob("*.csv"))
+    csv_call1 = sorted(dir_call1.glob("*.csv"))
+    csv_wp3 = sorted(dir_wp3.glob("*.csv"))
+    csv_all = csv_call1 + csv_wp3
 
-    #find_bad_aphiaid_entries(csv_files_wp3)
+    # where to write plots
+    out_base = Path("../plots")
+    out_base.mkdir(parents=True, exist_ok=True)
 
-    csv_files = csv_files_call1 + csv_files_wp3
+    # Load world once in Web Mercator for inset; set as global for helper use
+    try:
+        PLOT_WORLD_GDF = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres")).to_crs(3857)
+    except Exception as e:
+        print(f"⚠️ Could not load naturalearth_lowres world dataset: {e}")
+        # make a minimal empty GeoDataFrame as fallback to avoid crashes
+        PLOT_WORLD_GDF = gpd.GeoDataFrame()
 
-    csv_files.sort()  # Optional: sort by name/dasid
+    # 1) Plot each CSV individually (loop over all CSVs)
+    print(">> Plotting each CSV individually...")
+    plot_each_csv_individual(csv_all, out_base)
 
-    plot_unique_locations(csv_files=csv_files,
-                          output_file="../plots/unique_locations_map.png")
+    # 2) WP3 combined
+    print(">> Plotting combined WP3 (sensor) map...")
+    plot_combined(csv_wp3, out_base / "map_sensor.png",
+                  show_inset=False,
+                  title="Sensor data")
 
-    # Generate all plots
-    # plot_interactive_heatmap(csv_files,
-    #                          notes_file="aggregate_description.html",
-    #                          output_file="../plots/aggregated_heatmap.html")
-    #
-    # plot_interactive_heatmap_dark(csv_files,
-    #                          notes_file="aggregate_description.html",
-    #                          output_file="../plots/aggregated_heatmap_dark.html")
+    # 3) Call1 combined
+    print(">> Plotting combined Call1 (observation) map...")
+    plot_combined(csv_call1, out_base / "map_observation.png",
+                  show_inset=False,
+                  title="Observation data")
 
+    # 4) All combined
+    print(">> Plotting combined Call1 + WP3 map...")
+    plot_combined(csv_all, out_base / "map_combined.png",
+                  show_inset=False,
+                  title="Combined Observation & Sensor Data")
 
-
+    print("All done.")
