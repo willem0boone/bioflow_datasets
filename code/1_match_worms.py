@@ -4,8 +4,8 @@ from pathlib import Path
 from collections import Counter
 import ast
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-import time
 
 # ------------------------
 # Cache setup
@@ -14,7 +14,6 @@ cache_dir = Path("../cache")
 cache_dir.mkdir(parents=True, exist_ok=True)
 cache_file = cache_dir / "aphia_cache.json"
 
-# Load existing cache if present
 aphia_cache = {}
 if cache_file.exists():
     try:
@@ -23,7 +22,6 @@ if cache_file.exists():
     except Exception:
         aphia_cache = {}
 
-# Lock for thread-safe cache writing (optional if multithreading is used)
 cache_lock = threading.Lock()
 
 # ------------------------
@@ -31,49 +29,36 @@ cache_lock = threading.Lock()
 # ------------------------
 def get_aphia_record(aphia_id: int):
     """
-    Retrieve WoRMS Aphia record, using cache if available.
-    Added print statements to validate cache behavior.
+    Retrieve WoRMS Aphia record using cache if available.
     """
     aphia_id_str = str(aphia_id)
-
-    # Check cache first
     if aphia_id_str in aphia_cache:
-        # print(f"🔹 Cache hit for AphiaID {aphia_id}")
         return aphia_cache[aphia_id_str]
 
-    # print(f"🔸 Cache miss for AphiaID {aphia_id}, requesting from WoRMS API...")
     url = f"https://www.marinespecies.org/rest/AphiaRecordByAphiaID/{aphia_id}"
-
     try:
+        print(f"request WORMS for {aphia_id}")
         response = requests.get(url, headers={"accept": "application/json"}, timeout=10)
         response.raise_for_status()
         record = response.json()
-        # print(f"✅ Successfully retrieved AphiaID {aphia_id}")
-    except Exception as e:
-        # print(f"⚠️ Failed to fetch AphiaID {aphia_id}: {e}")
+    except Exception:
         record = None
 
-    # Save to cache immediately
     with cache_lock:
         aphia_cache[aphia_id_str] = record
-        try:
-            with open(cache_file, "w") as f:
-                json.dump(aphia_cache, f, indent=2)
-            # print(f"💾 Cache updated for AphiaID {aphia_id}, cache size: {cache_file.stat().st_size / 1024:.2f} KB")
-        except Exception as e:
-            print(f"⚠️ Failed to write cache to disk: {e}")
 
     return record
 
 # ------------------------
-# Process a single CSV
+# Process CSV
 # ------------------------
-def process_csv(csv_file: Path):
+def process_csv(csv_file: Path, max_threads=10):
     """
     Process one CSV:
       1. Count occurrences of each AphiaID
-      2. Get taxonomy info (from cache or REST API)
+      2. Get taxonomy info (from cache or REST API, multithreaded)
       3. Return list of dicts {"taxonomy": [...], "count": n}
+      4. Save cache after processing CSV
     """
     try:
         df = pd.read_csv(csv_file)
@@ -83,32 +68,54 @@ def process_csv(csv_file: Path):
 
     aphia_counter = Counter()
 
-    # Count occurrences of each AphiaID
+    # Preprocess aphiaids to avoid repeated ast.literal_eval
+    aphia_lists = []
     for row in df.itertuples():
         try:
-            aphia_list = ast.literal_eval(row.aphiaid)
-            if isinstance(aphia_list, int):
-                aphia_list = [aphia_list]
-            aphia_counter.update(aphia_list)
+            val = row.aphiaid
+            if isinstance(val, str):
+                val_list = ast.literal_eval(val)
+            elif isinstance(val, int):
+                val_list = [val]
+            else:
+                val_list = []
+            aphia_lists.append(val_list)
+            aphia_counter.update(val_list)
         except Exception:
             continue
 
     results = []
 
-    for aphia_id, count in aphia_counter.items():
-        record = get_aphia_record(aphia_id)
-        if not record:
-            continue
-        taxonomy = [
-            record.get("kingdom"),
-            record.get("phylum"),
-            record.get("class"),
-            record.get("order"),
-            record.get("family"),
-            record.get("genus"),
-            record.get("scientificname")
-        ]
-        results.append({"taxonomy": taxonomy, "count": count})
+    # Multithreaded fetching of records
+    def fetch_record(aid):
+        rec = get_aphia_record(aid)
+        if rec:
+            taxonomy = [
+                rec.get("kingdom"),
+                rec.get("phylum"),
+                rec.get("class"),
+                rec.get("order"),
+                rec.get("family"),
+                rec.get("genus"),
+                rec.get("scientificname")
+            ]
+            return {"taxonomy": taxonomy, "count": aphia_counter[aid]}
+        return None
+
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = {executor.submit(fetch_record, aid): aid for aid in aphia_counter.keys()}
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                results.append(res)
+
+    # Save cache after processing CSV
+    with cache_lock:
+        try:
+            with open(cache_file, "w") as f:
+                json.dump(aphia_cache, f, indent=2)
+        except Exception as e:
+            print(f"⚠️ Failed to write cache to disk: {e}")
 
     return results
 
@@ -121,11 +128,10 @@ if __name__ == "__main__":
 
     csv_dirs = {
         "call1": Path("../data/output_call1"),
-        "sensor_data": Path("../data/output_sensor_data")
+        "sensor": Path("../data/output_sensor_data")
     }
 
     for source_name, csv_dir in csv_dirs.items():
-        # Create subdirectory for this source
         sub_output_dir = output_dir / f"worms_{source_name}_data"
         sub_output_dir.mkdir(parents=True, exist_ok=True)
 
