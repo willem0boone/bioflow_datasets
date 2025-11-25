@@ -13,11 +13,19 @@ from pathlib import Path
 import ast
 import pandas as pd
 import geopandas as gpd
-import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import contextily as ctx
 import textwrap
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from PIL import Image
+import datashader as ds
+import datashader.transfer_functions as tf
+import colorcet as cc
 
 # -------------------------
 # Configuration
@@ -198,7 +206,6 @@ def plot_gdf_map(
 
     # DASID textbox
     if dasids_text:
-        import textwrap
         wrapped = textwrap.fill(dasids_text, width=100)
         ax.text(
             0.98, 0.02,
@@ -217,9 +224,103 @@ def plot_gdf_map(
     print(f"✔ Saved map: {output_path}")
 
 
+def plot_large_gdf(gdf, output_path, title=None, dasids=None):
+    import textwrap
+    import numpy as np
+    import datashader as ds
+    import datashader.transfer_functions as tf
+    import colorcet as cc
+    from matplotlib.colors import LinearSegmentedColormap
+    import matplotlib.pyplot as plt
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    # Web Mercator global extent
+    WEB_MERC_MAX_X = 20037508.34
+    WEB_MERC_MIN_X = -20037508.34
+    WEB_MERC_YMIN = -9074929
+    WEB_MERC_YMAX = 16847944
+
+    print("=== Starting plot_large_gdf ===")
+
+    # --- 1. Project to Web Mercator ---
+    gdf = gdf.to_crs(3857)
+    print("Projected bounds:", gdf.total_bounds)
+
+    # --- 2. Datashader canvas ---
+    cvs = ds.Canvas(
+        plot_width=1200,
+        plot_height=1200,
+        x_range=(WEB_MERC_MIN_X, WEB_MERC_MAX_X),
+        y_range=(WEB_MERC_YMIN, WEB_MERC_YMAX)
+    )
+
+    # --- 3. Aggregate ---
+    gdf["x"] = gdf.geometry.x
+    gdf["y"] = gdf.geometry.y
+    agg = cvs.points(gdf, x="x", y="y")
+    print("Aggregation min/max:", agg.values.min(), agg.values.max())
+
+    # --- 4. Scale nonzero values only ---
+    agg_scaled = agg.copy()
+    nonzero_mask = agg_scaled.values > 0
+    agg_scaled.values[nonzero_mask] = agg_scaled.values[nonzero_mask] ** 0.3  # root scaling for low counts
+
+    # Clip extreme high values to 99.9th percentile (nonzero)
+    nonzero = agg_scaled.values[nonzero_mask]
+    vmax = np.percentile(nonzero, 99.9)
+    agg_scaled.values[nonzero_mask] = np.clip(nonzero, 1, vmax)
+
+    # Custom cwr colormap starting at red
+    cwr_cmap = LinearSegmentedColormap.from_list("cwr_custom", cc.cwr[50:])
+
+    # Shade
+    img = tf.shade(agg_scaled, cmap=cwr_cmap, how="linear", min_alpha=0).to_pil()
+    print("Shading done. Nonzero cells visible, zero cells stay black.")
+
+    # --- 5. Stats ---
+    n_obs = len(gdf)
+    if "aphiaid" in gdf.columns:
+        all_ids = [i for row in gdf["aphiaid"] for i in row]
+        n_unique_taxa = len(set(all_ids))
+    else:
+        n_unique_taxa = 0
+
+    # --- 6. Plot with Cartopy ---
+    fig = plt.figure(figsize=(14, 10))
+    ax = plt.axes(projection=ccrs.Mercator())
+    ax.set_extent([WEB_MERC_MIN_X, WEB_MERC_MAX_X, WEB_MERC_YMIN, WEB_MERC_YMAX], crs=ccrs.Mercator())
+    ax.set_facecolor("black")
+    ax.add_feature(cfeature.LAND, facecolor="black", edgecolor="white", linewidth=0.3)
+    ax.add_feature(cfeature.COASTLINE, edgecolor="white", linewidth=0.3)
+
+    # --- 7. Overlay image ---
+    img_array = np.array(img)
+    img_array = np.flipud(img_array)
+    ax.imshow(
+        img_array,
+        extent=(WEB_MERC_MIN_X, WEB_MERC_MAX_X, WEB_MERC_YMIN, WEB_MERC_YMAX),
+        transform=ccrs.Mercator(),
+        origin="lower"
+    )
+
+    # --- 8. Title ---
+    auto_stats = f"Observations: {n_obs} | Taxa: {n_unique_taxa}"
+    final_title = f"{title}\n{auto_stats}" if title else f"Observation Data\n{auto_stats}"
+    if dasids:
+        wrapped_dasids = "\n".join(textwrap.wrap(dasids, width=25))
+        final_title += f"\nDASIDs: {wrapped_dasids}"
+    plt.title(final_title, fontsize=16, pad=20, color="white")
+
+    # --- 9. Save ---
+    fig.savefig(output_path, dpi=1000, bbox_inches="tight", facecolor="black")
+    plt.close(fig)
+    print("=== Finished plot_large_gdf ===")
+
+
 def plot_each_csv_individual(csv_files, outdir_base: Path):
     """Plot every CSV in csv_files individually. Save outputs in outdir_base/map_per_dasid/."""
-    outdir = outdir_base / "map_per_dasid"
+    outdir = outdir_base
     outdir.mkdir(parents=True, exist_ok=True)
 
     for csv_path in csv_files:
@@ -282,9 +383,51 @@ def plot_combined(csv_files, out_file_base: Path, title: str, show_inset=True):
     )
 
 
-# -------------------------
-# Main run
-# -------------------------
+def plot_shader(csv_files, output_path, title):
+    gdfs = []
+    dasids = []
+
+    # --- Load CSV files ---
+    for csv_path in csv_files:
+        gdf = read_csv_as_unique_gdf(csv_path)
+        if gdf is None or len(gdf) == 0:
+            continue
+
+        gdfs.append(gdf)
+
+        # collect DASID if available
+        if "dasid" in gdf.columns:
+            dasids.append(str(gdf["dasid"].iloc[0]))
+
+    if not gdfs:
+        print(f"⚠️ No valid input files for combined plot '{title}' — skipping")
+        return
+
+    # --- Merge into one GeoDataFrame ---
+    combined = gpd.GeoDataFrame(
+        pd.concat(gdfs, ignore_index=True),
+        crs=gdfs[0].crs
+    )
+
+    # Drop duplicates based on geometry
+    combined = combined.drop_duplicates(subset="geometry")
+
+    # # DASIDs text (comma-separated)
+    # dasids_text = ", ".join(dasids)
+
+    # Add DASID text to the title (optional)
+    # full_title = f"{title}\nDASIDs: {dasids_text}"
+
+    # --- Call your existing fast Datashader plotter ---
+    plot_large_gdf(
+        gdf=combined,
+        output_path=output_path,
+        title=title
+    )
+
+    print(f"✔ Combined shader plot saved: {output_path}")
+
+
 if __name__ == "__main__":
     # input directories (adjust as needed)
     dir_call1 = Path("../data/output_call1")
@@ -308,24 +451,37 @@ if __name__ == "__main__":
 
     # 1) Plot each CSV individually (loop over all CSVs)
     print(">> Plotting each CSV individually...")
-    plot_each_csv_individual(csv_all, out_base)
 
-    # 2) WP3 combined
-    print(">> Plotting combined WP3 (sensor) map...")
-    plot_combined(csv_wp3, out_base / "map_sensor.png",
-                  show_inset=False,
-                  title="Sensor data")
+    # plot_each_csv_individual(csv_call1, Path("../plots/observation_maps"))
+    # plot_each_csv_individual(csv_wp3, Path("../plots/sensor_maps"))
 
-    # 3) Call1 combined
+    # 2) Call1 combined
     print(">> Plotting combined Call1 (observation) map...")
-    plot_combined(csv_call1, out_base / "map_observation.png",
-                  show_inset=False,
-                  title="Observation data")
+    # plot_combined(csv_call1, out_base / "map_observation.png",
+    #               show_inset=False,
+    #               title="Observation data")
+    plot_shader(csv_call1,
+                out_base / "mapshader_observation.png",
+                title="Observation data")
+
+    # 3) WP3 combined
+    print(">> Plotting combined WP3 (sensor) map...")
+    # plot_combined(csv_wp3, out_base / "map_sensor.png",
+    #               show_inset=False,
+    #               title="Sensor data")
+    plot_shader(csv_wp3,
+                out_base / "mapshader_sensor.png",
+                title="Sensor data")
 
     # 4) All combined
     print(">> Plotting combined Call1 + WP3 map...")
-    plot_combined(csv_all, out_base / "map_combined.png",
-                  show_inset=False,
-                  title="Combined Observation & Sensor Data")
+    # plot_combined(csv_all, out_base / "map_combined.png",
+    #               show_inset=False,
+    #               title="Combined Observation & Sensor Data")
 
+    plot_shader(csv_all,
+                out_base / "mapshader_combined.png",
+                title="Combined Observation & Sensor Data")
     print("All done.")
+
+
