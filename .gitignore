@@ -36,3 +36,6 @@ Thumbs.db
 
 /cache
 /data
+
+*.mp4
+/dashboard

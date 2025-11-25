@@ -3,6 +3,8 @@ import plotly.express as px
 import json
 from pathlib import Path
 from collections import defaultdict
+from matplotlib import colors as mcolors
+import plotly.colors as pc
 
 # Input folders
 folders = {
@@ -17,17 +19,15 @@ output_base_dir.mkdir(parents=True, exist_ok=True)
 def build_sunburst_df(taxonomy_data):
     rows = []
     for record in taxonomy_data:
-        path = [val if val is not None else "Unknown" for val in
-                record["taxonomy"]]
+        path = [val if val is not None else "Unknown" for val in record["taxonomy"]]
         while len(path) < 7:
             path.append("Unknown")
         count = record.get("count", 0)
         for i, name in enumerate(path):
-            node_id = "|".join(path[:i + 1])
+            node_id = "|".join(path[:i+1])
             parent = "" if i == 0 else "|".join(path[:i])
             value = count if i == len(path) - 1 else 0
-            rows.append({"id": node_id, "label": name, "parent": parent,
-                         "value": value})
+            rows.append({"id": node_id, "label": name, "parent": parent, "value": value})
     df = pd.DataFrame(rows)
     df = df.groupby(["id", "label", "parent"], as_index=False)["value"].sum()
     return df
@@ -38,7 +38,7 @@ def remove_zero_branches(df):
     valid_ids = set()
     for leaf_id in leaves["id"]:
         parts = leaf_id.split("|")
-        for i in range(1, len(parts) + 1):
+        for i in range(1, len(parts)+1):
             valid_ids.add("|".join(parts[:i]))
     return df[df["id"].isin(valid_ids)].reset_index(drop=True)
 
@@ -52,20 +52,49 @@ def add_missing_parents(df):
         parts = parent.split("|")
         label = parts[-1]
         parent_id = "" if len(parts) == 1 else "|".join(parts[:-1])
-        rows.append(
-            {"id": parent, "label": label, "parent": parent_id, "value": 0})
+        rows.append({"id": parent, "label": label, "parent": parent_id, "value": 0})
     if rows:
         df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
     return df
 
-
 def merge_taxonomies(all_taxonomies):
     merged = defaultdict(int)
     for record in all_taxonomies:
-        key = tuple(val if val is not None else "Unknown" for val in
-                    record["taxonomy"])
+        key = tuple(val if val is not None else "Unknown" for val in record["taxonomy"])
         merged[key] += record.get("count", 0)
     return [{"taxonomy": list(k), "count": v} for k, v in merged.items()]
+
+
+def assign_nested_colors(df):
+    """
+    Assign colors for sunburst:
+    - Top-level nodes: vivid base colors
+    - Children: lighter shades of parent base color
+    """
+    # Vivid colors for top-level nodes
+    top_colors = ['#e41a1c', '#377eb8', '#4daf4a', '#ff7f00', '#984ea3', '#ffff33']
+    top_nodes = df[df['parent'] == '']['label'].unique()
+    top_color_map = {k: top_colors[i % len(top_colors)] for i, k in enumerate(top_nodes)}
+
+    color_map = {}
+    for idx, row in df.iterrows():
+        parts = row['id'].split('|')
+        depth = len(parts) - 1
+        base = top_color_map[parts[0]]
+
+        # Lighten color for sublevels
+        rgb = mcolors.to_rgb(base)
+        factor = 1 + 0.15*depth  # lighter with depth
+        shaded = [min(1, c*factor) for c in rgb]
+
+        # Small sibling variation for diversity
+        sibling_variation = ((hash(row['label']) % 10) - 5) * 0.02
+        shaded = [min(1, max(0, c + sibling_variation)) for c in shaded]
+
+        color_map[row['id']] = f'rgb({int(shaded[0]*255)},{int(shaded[1]*255)},{int(shaded[2]*255)})'
+
+    # Return colors in same order as df
+    return [color_map[i] for i in df['id']]
 
 
 if __name__ == "__main__":
@@ -86,8 +115,9 @@ if __name__ == "__main__":
             df_sb = build_sunburst_df(taxonomy_data)
             df_sb = remove_zero_branches(df_sb)
             df_sb = add_missing_parents(df_sb)
-            fig = px.sunburst(df_sb, ids='id', names='label', parents='parent',
-                              values='value')
+            colors = assign_nested_colors(df_sb)
+            fig = px.sunburst(df_sb, ids='id', names='label', parents='parent', values='value')
+            fig.update_traces(marker=dict(colors=colors))
             fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
             output_file = output_dir / f"{json_file.stem}.html"
             fig.write_html(output_file)
@@ -98,8 +128,9 @@ if __name__ == "__main__":
         df_sb = build_sunburst_df(merged_data)
         df_sb = remove_zero_branches(df_sb)
         df_sb = add_missing_parents(df_sb)
-        fig = px.sunburst(df_sb, ids='id', names='label', parents='parent',
-                          values='value')
+        colors = assign_nested_colors(df_sb)
+        fig = px.sunburst(df_sb, ids='id', names='label', parents='parent', values='value')
+        fig.update_traces(marker=dict(colors=colors))
         fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
         merged_file = output_base_dir / f"{name}.html"  # call1.html or sensor.html
         fig.write_html(merged_file)
@@ -112,12 +143,10 @@ if __name__ == "__main__":
     df_sb = build_sunburst_df(merged_all)
     df_sb = remove_zero_branches(df_sb)
     df_sb = add_missing_parents(df_sb)
-    fig = px.sunburst(df_sb, ids='id', names='label', parents='parent',
-                      values='value')
+    colors = assign_nested_colors(df_sb)
+    fig = px.sunburst(df_sb, ids='id', names='label', parents='parent', values='value')
+    fig.update_traces(marker=dict(colors=colors))
     fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
     combined_file = output_base_dir / "all_data.html"
     fig.write_html(combined_file)
     print(f"Saved merged sunburst for all data: {combined_file}")
-
-
-

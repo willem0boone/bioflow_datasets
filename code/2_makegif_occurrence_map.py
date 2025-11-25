@@ -2,7 +2,8 @@ import imageio
 from pathlib import Path
 from PIL import Image
 
-def pngs_to_gif(input_files, output_gif, duration=0.8):
+
+def pngs_to_gif(input_files, output_gif, duration=2):
     """
     Create a GIF from a list of PNG files.
 
@@ -66,6 +67,9 @@ if __name__ == "__main__":
     output_sensors = Path(r"..\plots\map_sensors.gif")
     output_combined = Path(r"..\plots\map_combined.gif")
 
-    pngs_to_gif(png_call1, output_call1, duration=0.8)
-    pngs_to_gif(png_wp3, output_sensors, duration=0.8)
-    pngs_to_gif(png_all, output_combined, duration=0.8)
+    pngs_to_gif(png_call1, output_call1, duration=2)
+    pngs_to_gif(png_wp3, output_sensors, duration=2)
+    pngs_to_gif(png_all, output_combined, duration=2)
+
+
+
