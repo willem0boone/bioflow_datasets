@@ -94,11 +94,12 @@ def plot_interactive_heatmap(csv_files, notes_file, output_file, dark=False):
 
             <b>Total observations:</b> {total_obs}<br><br>
 
-            <b>Dasids:</b><br>
-            {wrapped_dasids}
+
 
         </div>
     '''
+    # <b>Dasids:</b><br>
+    # {wrapped_dasids}
 
     m.get_root().html.add_child(folium.Element(merged_box_html))
 

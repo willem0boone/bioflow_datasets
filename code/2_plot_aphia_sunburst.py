@@ -67,33 +67,28 @@ def merge_taxonomies(all_taxonomies):
 
 def assign_nested_colors(df):
     """
-    Assign colors for sunburst:
-    - Top-level nodes: vivid base colors
-    - Children: lighter shades of parent base color
+    Assign all nodes a blue color,
+    with deeper levels getting progressively lighter.
     """
-    # Vivid colors for top-level nodes
-    top_colors = ['#e41a1c', '#377eb8', '#4daf4a', '#ff7f00', '#984ea3', '#ffff33']
-    top_nodes = df[df['parent'] == '']['label'].unique()
-    top_color_map = {k: top_colors[i % len(top_colors)] for i, k in enumerate(top_nodes)}
+
+    base_blue = "#033f69"  # Plotly's default blue
+    rgb_base = mcolors.to_rgb(base_blue)
 
     color_map = {}
+
     for idx, row in df.iterrows():
         parts = row['id'].split('|')
-        depth = len(parts) - 1
-        base = top_color_map[parts[0]]
+        depth = len(parts) - 1  # 0 = root, deeper = higher number
 
-        # Lighten color for sublevels
-        rgb = mcolors.to_rgb(base)
-        factor = 1 + 0.15*depth  # lighter with depth
-        shaded = [min(1, c*factor) for c in rgb]
+        # Lighten the blue depending on depth
+        # factor < 1 = darker ; factor > 1 = lighter
+        factor = 1 + depth * 0.18
+        shaded = [min(1, c * factor) for c in rgb_base]
 
-        # Small sibling variation for diversity
-        sibling_variation = ((hash(row['label']) % 10) - 5) * 0.02
-        shaded = [min(1, max(0, c + sibling_variation)) for c in shaded]
+        # Convert to RGB string
+        color_map[row['id']] = f"rgb({int(shaded[0]*255)}, {int(shaded[1]*255)}, {int(shaded[2]*255)})"
 
-        color_map[row['id']] = f'rgb({int(shaded[0]*255)},{int(shaded[1]*255)},{int(shaded[2]*255)})'
-
-    # Return colors in same order as df
+    # Return colors matching df order
     return [color_map[i] for i in df['id']]
 
 
