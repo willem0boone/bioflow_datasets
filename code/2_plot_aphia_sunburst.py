@@ -19,15 +19,29 @@ output_base_dir.mkdir(parents=True, exist_ok=True)
 def build_sunburst_df(taxonomy_data):
     rows = []
     for record in taxonomy_data:
-        path = [val if val is not None else "Unknown" for val in record["taxonomy"]]
-        while len(path) < 7:
-            path.append("Unknown")
+
+        # Trim taxonomy at first None
+        path = []
+        for val in record["taxonomy"]:
+            if val is None:
+                break
+            path.append(val)
+
         count = record.get("count", 0)
+
+        # Build nodes only for actual known taxonomy levels
         for i, name in enumerate(path):
             node_id = "|".join(path[:i+1])
             parent = "" if i == 0 else "|".join(path[:i])
             value = count if i == len(path) - 1 else 0
-            rows.append({"id": node_id, "label": name, "parent": parent, "value": value})
+
+            rows.append({
+                "id": node_id,
+                "label": name,
+                "parent": parent,
+                "value": value
+            })
+
     df = pd.DataFrame(rows)
     df = df.groupby(["id", "label", "parent"], as_index=False)["value"].sum()
     return df
@@ -57,12 +71,21 @@ def add_missing_parents(df):
         df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
     return df
 
+
 def merge_taxonomies(all_taxonomies):
     merged = defaultdict(int)
+
     for record in all_taxonomies:
-        key = tuple(val if val is not None else "Unknown" for val in record["taxonomy"])
-        merged[key] += record.get("count", 0)
+        key = []
+        for val in record["taxonomy"]:
+            if val is None:
+                break
+            key.append(val)
+
+        merged[tuple(key)] += record.get("count", 0)
+
     return [{"taxonomy": list(k), "count": v} for k, v in merged.items()]
+
 
 
 def assign_nested_colors(df):

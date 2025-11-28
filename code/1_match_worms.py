@@ -97,8 +97,14 @@ def process_csv(csv_file: Path, max_threads=10):
                 rec.get("order"),
                 rec.get("family"),
                 rec.get("genus"),
-                rec.get("scientificname")
             ]
+
+            # Only add scientificname if it is NOT identical to any earlier rank
+            sci = rec.get("scientificname")
+            if sci not in taxonomy:
+                taxonomy.append(sci)
+            else:
+                taxonomy.append(None)
             return {"taxonomy": taxonomy, "count": aphia_counter[aid]}
         return None
 
